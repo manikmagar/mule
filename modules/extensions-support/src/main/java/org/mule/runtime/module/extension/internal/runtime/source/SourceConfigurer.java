@@ -22,6 +22,7 @@ import org.mule.runtime.core.api.event.CoreEvent;
 import org.mule.runtime.core.privileged.event.BaseEventContext;
 import org.mule.runtime.extension.api.annotation.param.Parameter;
 import org.mule.runtime.extension.api.runtime.config.ConfigurationInstance;
+import org.mule.runtime.extension.api.runtime.source.PollingSource;
 import org.mule.runtime.extension.api.runtime.source.Source;
 import org.mule.runtime.module.extension.internal.loader.ParameterGroupDescriptor;
 import org.mule.runtime.module.extension.internal.runtime.objectbuilder.ResolverSetBasedObjectBuilder;
@@ -90,7 +91,14 @@ public final class SourceConfigurer {
     CoreEvent initialiserEvent = null;
     try {
       initialiserEvent = getInitialiserEvent(muleContext);
-      return builder.build(from(initialiserEvent, config));
+      Source configuredSource = builder.build(from(initialiserEvent, config));
+
+      if (configuredSource instanceof PollingSource) {
+        //TODO: inject scheduler
+        configuredSource = new PollingSourceBridge((PollingSource) configuredSource, null);
+      }
+
+      return configuredSource;
     } catch (Exception e) {
       throw new MuleRuntimeException(createStaticMessage("Exception was found trying to configure source of type "
           + source.getClass().getName()), e);

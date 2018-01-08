@@ -1456,9 +1456,18 @@
             </xsd:documentation>
         </xsd:annotation>
     </xsd:element>
+
+    <xsd:element name="global-abstract-scheduling-strategy" substitutionGroup="abstract-shared-extension" abstract="true" type="abstractSchedulingStrategyType">
+        <xsd:annotation>
+            <xsd:documentation>
+                A placeholder for global scheduling strategies
+            </xsd:documentation>
+        </xsd:annotation>
+    </xsd:element>
+
     <xsd:complexType name="abstractSchedulingStrategyType">
         <xsd:complexContent>
-            <xsd:extension base="annotatedType"/>
+            <xsd:extension base="abstractExtensionType"/>
         </xsd:complexContent>
     </xsd:complexType>
 

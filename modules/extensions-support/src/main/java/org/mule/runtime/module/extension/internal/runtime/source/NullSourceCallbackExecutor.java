@@ -22,6 +22,10 @@ import org.reactivestreams.Publisher;
  */
 public class NullSourceCallbackExecutor implements SourceCallbackExecutor {
 
+  public static final NullSourceCallbackExecutor INSTANCE = new NullSourceCallbackExecutor();
+
+  private NullSourceCallbackExecutor() {}
+
   /**
    * @return {@code null}
    */

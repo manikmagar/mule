@@ -80,6 +80,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Supplier;
 
 import javax.inject.Inject;
 
@@ -112,6 +113,7 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
   private final SourceConnectionManager connectionManager;
   private final MessagingExceptionResolver exceptionResolver;
   private final BackPressureAction backPressureAction;
+  private final Supplier<Source> sourceInvokationTarget;
 
   private ErrorType flowBackPressueErrorType;
 
@@ -139,6 +141,9 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
     this.extensionModel = extensionModel;
     this.sourceModel = sourceModel;
     this.source = source;
+    sourceInvokationTarget = source instanceof PollingSourceWrapper
+        ? () -> ((SourceWrapper<Object, Object>) source).getDelegate()
+        : () -> source;
     this.cursorProviderFactory = cursorProviderFactory;
     this.configurationInstance = configurationInstance;
     this.sourceCallbackFactory = sourceCallbackFactory;
@@ -164,25 +169,52 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
   }
 
   private SourceCompletionHandlerFactory doCreateCompletionHandler(SourceCallbackModelProperty modelProperty) {
-    final SourceCallbackExecutor onSuccessExecutor = getMethodExecutor(modelProperty.getOnSuccessMethod(), modelProperty);
-    final SourceCallbackExecutor onErrorExecutor = getMethodExecutor(modelProperty.getOnErrorMethod(), modelProperty);
-    final SourceCallbackExecutor onTerminateExecutor = getMethodExecutor(modelProperty.getOnTerminateMethod(), modelProperty);
-    final SourceCallbackExecutor onBackPressureExecutor =
-        getMethodExecutor(modelProperty.getOnBackPressureMethod(), modelProperty);
+    SourceCallbackExecutor onSuccessExecutor;
+    SourceCallbackExecutor onErrorExecutor;
+    SourceCallbackExecutor onTerminateExecutor;
+    SourceCallbackExecutor onBackPressureExecutor;
+
+    if (source instanceof SourceWrapper) {
+      SourceWrapper wrapper = (SourceWrapper) source;
+      onSuccessExecutor = getMethodExecutor(modelProperty.getOnSuccessMethod(), modelProperty, wrapper::onSuccess);
+      onErrorExecutor = getMethodExecutor(modelProperty.getOnErrorMethod(), modelProperty, wrapper::onError);
+      onTerminateExecutor = getMethodExecutor(modelProperty.getOnTerminateMethod(), modelProperty, wrapper::onTerminate);
+      onBackPressureExecutor = getMethodExecutor(modelProperty.getOnBackPressureMethod(), modelProperty, wrapper::onBackPressure);
+    } else {
+      onSuccessExecutor = getMethodExecutor(modelProperty.getOnSuccessMethod(), modelProperty);
+      onErrorExecutor = getMethodExecutor(modelProperty.getOnErrorMethod(), modelProperty);
+      onTerminateExecutor = getMethodExecutor(modelProperty.getOnTerminateMethod(), modelProperty);
+      onBackPressureExecutor = getMethodExecutor(modelProperty.getOnBackPressureMethod(), modelProperty);
+    }
 
     return context -> new DefaultSourceCompletionHandler(onSuccessExecutor, onErrorExecutor, onTerminateExecutor,
                                                          onBackPressureExecutor, context);
   }
 
-  private SourceCallbackExecutor getMethodExecutor(Optional<Method> method, SourceCallbackModelProperty sourceCallbackModel) {
-    return method.map(m -> (SourceCallbackExecutor) new ReflectiveSourceCallbackExecutor(extensionModel, configurationInstance,
-                                                                                         sourceModel, source, m,
-                                                                                         cursorProviderFactory,
-                                                                                         streamingManager,
-                                                                                         component,
-                                                                                         muleContext,
-                                                                                         sourceCallbackModel))
-        .orElse(new NullSourceCallbackExecutor());
+  private SourceCallbackExecutor getMethodExecutor(Optional<Method> method,
+                                                   SourceCallbackModelProperty sourceCallbackModel) {
+    return getMethodExecutor(method, sourceCallbackModel, null);
+  }
+
+  private SourceCallbackExecutor getMethodExecutor(Optional<Method> method,
+                                                   SourceCallbackModelProperty sourceCallbackModel,
+                                                   SourceCallbackExecutor before) {
+    SourceCallbackExecutor executor = method
+        .map(m -> (SourceCallbackExecutor) new ReflectiveSourceCallbackExecutor(extensionModel, configurationInstance,
+                                                                                sourceModel,
+                                                                                sourceInvokationTarget.get(),
+                                                                                m, cursorProviderFactory,
+                                                                                streamingManager,
+                                                                                component,
+                                                                                muleContext,
+                                                                                sourceCallbackModel))
+        .orElse(NullSourceCallbackExecutor.INSTANCE);
+
+    if (before != null) {
+      executor = new CompositeSourceCallbackExecutor(before, executor, null);
+    }
+
+    return executor;
   }
 
   @Override
@@ -190,9 +222,9 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
     flowBackPressueErrorType = errorTypeRepository.getErrorType(FLOW_BACK_PRESSURE)
         .orElseThrow(() -> new IllegalStateException("FLOW_BACK_PRESSURE error type not found"));
 
-    initialiseIfNeeded(this.nonCallbackParameters, true, muleContext);
-    initialiseIfNeeded(this.errorCallbackParameters, true, muleContext);
-    initialiseIfNeeded(this.successCallbackParameters, true, muleContext);
+    initialiseIfNeeded(nonCallbackParameters, true, muleContext);
+    initialiseIfNeeded(errorCallbackParameters, true, muleContext);
+    initialiseIfNeeded(successCallbackParameters, true, muleContext);
   }
 
 
@@ -298,7 +330,10 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
     try {
       setConfiguration(configurationInstance);
       setConnection();
-      muleContext.getInjector().inject(source);
+      muleContext.getInjector().inject(sourceInvokationTarget.get());
+      if (source instanceof SourceWrapper) {
+        muleContext.getInjector().inject(source);
+      }
       source.onStart(createSourceCallback());
     } catch (Exception e) {
       throw new DefaultMuleException(e);
@@ -306,6 +341,12 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
   }
 
   private void injectComponentLocation() {
+    injectComponentLocation(sourceInvokationTarget.get());
+    if (source instanceof SourceWrapper) {
+      injectComponentLocation(source);
+    }
+  }
+  private void injectComponentLocation(Source source) {
     // ComponentLocationModelValidator assures that there's at most one field
     List<Field> fields = getFieldsOfType(source.getClass(), ComponentLocation.class);
     if (fields.isEmpty()) {
@@ -326,7 +367,7 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
 
   private void setConfiguration(Optional<ConfigurationInstance> configuration) {
     if (configurationSetter.isPresent() && configuration.isPresent()) {
-      configurationSetter.get().set(source, configuration.get().getValue());
+      configurationSetter.get().set(sourceInvokationTarget.get(), configuration.get().getValue());
     }
   }
 
@@ -337,22 +378,22 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
 
     FieldSetter<Object, ConnectionProvider> setter = connectionSetter.get();
     ConfigurationInstance config = configurationInstance.orElseThrow(() -> new DefaultMuleException(createStaticMessage(
-                                                                                                                        "Message Source on root component '%s' requires a connection but it doesn't point to any configuration. Please review your "
-                                                                                                                            + "application",
-                                                                                                                        component
-                                                                                                                            .getLocation()
-                                                                                                                            .getRootContainerName())));
+        "Message Source on root component '%s' requires a connection but it doesn't point to any configuration. Please review your "
+            + "application",
+        component
+            .getLocation()
+            .getRootContainerName())));
 
     if (!config.getConnectionProvider().isPresent()) {
       throw new DefaultMuleException(createStaticMessage(format(
-                                                                "Message Source on root component '%s' requires a connection, but points to config '%s' which doesn't specify any. "
-                                                                    + "Please review your application",
-                                                                component.getLocation().getRootContainerName(),
-                                                                config.getName())));
+          "Message Source on root component '%s' requires a connection, but points to config '%s' which doesn't specify any. "
+              + "Please review your application",
+          component.getLocation().getRootContainerName(),
+          config.getName())));
     }
 
     ConnectionProvider<Object> connectionProvider = new SourceConnectionProvider(connectionManager, config);
-    setter.set(source, connectionProvider);
+    setter.set(sourceInvokationTarget.get(), connectionProvider);
   }
 
   Optional<ConfigurationInstance> getConfigurationInstance() {
@@ -367,11 +408,11 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
     return fetchField(Connection.class).map(field -> {
       if (!ConnectionProvider.class.equals(field.getType())) {
         throw new IllegalModelDefinitionException(format(
-                                                         "Message Source defined on class '%s' has field '%s' of type '%s' annotated with @%s. That annotation can only be "
-                                                             + "used on fields of type '%s'",
-                                                         source.getClass().getName(), field.getName(), field.getType().getName(),
-                                                         Connection.class.getName(),
-                                                         ConnectionProvider.class.getName()));
+            "Message Source defined on class '%s' has field '%s' of type '%s' annotated with @%s. That annotation can only be "
+                + "used on fields of type '%s'",
+            sourceInvokationTarget.get().getClass().getName(), field.getName(), field.getType().getName(),
+            Connection.class.getName(),
+            ConnectionProvider.class.getName()));
       }
 
       return new FieldSetter<>(field);
@@ -379,7 +420,7 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
   }
 
   private Optional<Field> fetchField(Class<? extends Annotation> annotation) {
-    Set<Field> fields = getAllFields(source.getClass(), withAnnotation(annotation));
+    Set<Field> fields = getAllFields(sourceInvokationTarget.get().getClass(), withAnnotation(annotation));
     if (CollectionUtils.isEmpty(fields)) {
       return empty();
     }
@@ -387,26 +428,27 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
     if (fields.size() > 1) {
       // TODO: MULE-9220 Move this to a syntax validator
       throw new IllegalModelDefinitionException(
-                                                format("Message Source defined on class '%s' has more than one field annotated with '@%s'. "
-                                                    + "Only one field in the class can bare such annotation",
-                                                       source.getClass().getName(),
-                                                       annotation.getSimpleName()));
+          format("Message Source defined on class '%s' has more than one field annotated with '@%s'. "
+                     + "Only one field in the class can bare such annotation",
+                 sourceInvokationTarget.get().getClass().getName(),
+                 annotation.getSimpleName()));
     }
 
     return of(fields.iterator().next());
   }
 
   public String getName() {
-    return getSourceName(source.getClass());
+    return getSourceName(sourceInvokationTarget.get().getClass());
   }
 
   public Source getDelegate() {
-    return source;
+    return sourceInvokationTarget.get();
   }
 
   Optional<Publisher<Void>> getReconnectionAction(ConnectionException e) {
-    if (source instanceof Reconnectable) {
-      return of(create(sink -> ((Reconnectable) source).reconnect(e, new ReactiveReconnectionCallback(sink))));
+    if (sourceInvokationTarget.get() instanceof Reconnectable) {
+      return of(
+          create(sink -> ((Reconnectable) sourceInvokationTarget.get()).reconnect(e, new ReactiveReconnectionCallback(sink))));
     }
 
     return empty();
@@ -437,7 +479,7 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
       object = valueResolver.resolve(from(initialiserEvent));
     } catch (MuleException e) {
       throw new MuleRuntimeException(createStaticMessage("Unable to get the " + type.getSimpleName()
-          + " value for Message Source"), e);
+                                                             + " value for Message Source"), e);
     } finally {
       if (initialiserEvent != null) {
         ((BaseEventContext) initialiserEvent.getContext()).success();

@@ -95,7 +95,7 @@ public final class SourceConfigurer {
 
       if (configuredSource instanceof PollingSource) {
         //TODO: inject scheduler
-        configuredSource = new PollingSourceBridge((PollingSource) configuredSource, null);
+        configuredSource = new PollingSourceWrapper((PollingSource) configuredSource, null);
       }
 
       return configuredSource;

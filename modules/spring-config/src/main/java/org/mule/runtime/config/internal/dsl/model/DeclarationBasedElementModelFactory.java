@@ -13,7 +13,6 @@ import static java.util.stream.Stream.concat;
 import static java.util.stream.Stream.of;
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
 import static org.mule.runtime.api.component.ComponentIdentifier.builder;
-import static org.mule.runtime.api.meta.model.parameter.ParameterGroupModel.DEFAULT_GROUP_NAME;
 import static org.mule.runtime.api.util.Preconditions.checkArgument;
 import static org.mule.runtime.app.declaration.api.fluent.ElementDeclarer.newObjectValue;
 import static org.mule.runtime.config.internal.dsl.processor.xml.XmlCustomAttributeHandler.IS_CDATA;
@@ -281,7 +280,8 @@ class DeclarationBasedElementModelFactory {
 
   private void setupCurrentExtensionContext(String extension) {
     this.currentExtension = context.getExtension(extension)
-        .orElseThrow(() -> new IllegalArgumentException(format("Extension [%s] is not present in the current context. Available extensions are: %s",
+        .orElseThrow(() -> new IllegalArgumentException(
+                                                        format("Extension [%s] is not present in the current context. Available extensions are: %s",
                                                                extension,
                                                                context.getExtensions().stream().map(NamedObject::getName)
                                                                    .collect(toList()))));
@@ -381,31 +381,22 @@ class DeclarationBasedElementModelFactory {
         }
       }
 
-      if (group.getName().equals(DEFAULT_GROUP_NAME) && parentDsl.getPrefix().equals("file")
-          && parentDsl.getElementName().equals("listener")) {
-        // TODO Remove in EE-5855
-        addDefaultSchedulingStrategyToFileListenerIfRequired(parameterizedDeclaration, parentDsl,
-                                                             parentConfig, parentElement, group);
-      }
+      // TODO Remove in EE-5855
+      group.getParameter("schedulingStrategy")
+          .ifPresent(param -> {
+            if (!parameterizedDeclaration.getParameterGroup(group.getName())
+                .map(g -> g.getParameter("schedulingStrategy").orElse(null))
+                .isPresent()) {
+              addParameter("schedulingStrategy", newObjectValue()
+                  .ofType("org.mule.runtime.core.api.source.scheduler.FixedFrequencyScheduler")
+                  .withParameter("frequency", "1")
+                  .withParameter("timeUnit", "MINUTES")
+                  .build(),
+                           group.getParameter("schedulingStrategy").get(),
+                           parentDsl.getContainedElement("schedulingStrategy").get(), parentConfig, parentElement);
+            }
+          });
     });
-  }
-
-  private void addDefaultSchedulingStrategyToFileListenerIfRequired(ParameterizedElementDeclaration parameterizedDeclaration,
-                                                                    DslElementSyntax parentDsl,
-                                                                    InternalComponentConfiguration.Builder parentConfig,
-                                                                    DslElementModel.Builder parentElement,
-                                                                    ParameterGroupModel group) {
-    if (!parameterizedDeclaration.getParameterGroup(DEFAULT_GROUP_NAME)
-        .map(g -> g.getParameter("schedulingStrategy").orElse(null))
-        .isPresent()) {
-      addParameter("schedulingStrategy", newObjectValue()
-          .ofType("org.mule.runtime.core.api.source.scheduler.FixedFrequencyScheduler")
-          .withParameter("frequency", "1")
-          .withParameter("timeUnit", "MINUTES")
-          .build(),
-                   group.getParameter("schedulingStrategy").get(),
-                   parentDsl.getContainedElement("schedulingStrategy").get(), parentConfig, parentElement);
-    }
   }
 
   private <T> void addGroupParameterElements(ParameterGroupModel group,

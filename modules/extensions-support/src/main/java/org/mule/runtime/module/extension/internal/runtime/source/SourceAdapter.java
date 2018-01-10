@@ -347,6 +347,7 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
       injectComponentLocation(source);
     }
   }
+
   private void injectComponentLocation(Source source) {
     // ComponentLocationModelValidator assures that there's at most one field
     List<Field> fields = getFieldsOfType(source.getClass(), ComponentLocation.class);
@@ -379,18 +380,18 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
 
     FieldSetter<Object, ConnectionProvider> setter = connectionSetter.get();
     ConfigurationInstance config = configurationInstance.orElseThrow(() -> new DefaultMuleException(createStaticMessage(
-        "Message Source on root component '%s' requires a connection but it doesn't point to any configuration. Please review your "
-            + "application",
-        component
-            .getLocation()
-            .getRootContainerName())));
+                                                                                                                        "Message Source on root component '%s' requires a connection but it doesn't point to any configuration. Please review your "
+                                                                                                                            + "application",
+                                                                                                                        component
+                                                                                                                            .getLocation()
+                                                                                                                            .getRootContainerName())));
 
     if (!config.getConnectionProvider().isPresent()) {
       throw new DefaultMuleException(createStaticMessage(format(
-          "Message Source on root component '%s' requires a connection, but points to config '%s' which doesn't specify any. "
-              + "Please review your application",
-          component.getLocation().getRootContainerName(),
-          config.getName())));
+                                                                "Message Source on root component '%s' requires a connection, but points to config '%s' which doesn't specify any. "
+                                                                    + "Please review your application",
+                                                                component.getLocation().getRootContainerName(),
+                                                                config.getName())));
     }
 
     ConnectionProvider<Object> connectionProvider = new SourceConnectionProvider(connectionManager, config);
@@ -409,11 +410,12 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
     return fetchField(Connection.class).map(field -> {
       if (!ConnectionProvider.class.equals(field.getType())) {
         throw new IllegalModelDefinitionException(format(
-            "Message Source defined on class '%s' has field '%s' of type '%s' annotated with @%s. That annotation can only be "
-                + "used on fields of type '%s'",
-            sourceInvokationTarget.get().getClass().getName(), field.getName(), field.getType().getName(),
-            Connection.class.getName(),
-            ConnectionProvider.class.getName()));
+                                                         "Message Source defined on class '%s' has field '%s' of type '%s' annotated with @%s. That annotation can only be "
+                                                             + "used on fields of type '%s'",
+                                                         sourceInvokationTarget.get().getClass().getName(), field.getName(),
+                                                         field.getType().getName(),
+                                                         Connection.class.getName(),
+                                                         ConnectionProvider.class.getName()));
       }
 
       return new FieldSetter<>(field);
@@ -429,10 +431,10 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
     if (fields.size() > 1) {
       // TODO: MULE-9220 Move this to a syntax validator
       throw new IllegalModelDefinitionException(
-          format("Message Source defined on class '%s' has more than one field annotated with '@%s'. "
-                     + "Only one field in the class can bare such annotation",
-                 sourceInvokationTarget.get().getClass().getName(),
-                 annotation.getSimpleName()));
+                                                format("Message Source defined on class '%s' has more than one field annotated with '@%s'. "
+                                                    + "Only one field in the class can bare such annotation",
+                                                       sourceInvokationTarget.get().getClass().getName(),
+                                                       annotation.getSimpleName()));
     }
 
     return of(fields.iterator().next());
@@ -449,7 +451,8 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
   Optional<Publisher<Void>> getReconnectionAction(ConnectionException e) {
     if (sourceInvokationTarget.get() instanceof Reconnectable) {
       return of(
-          create(sink -> ((Reconnectable) sourceInvokationTarget.get()).reconnect(e, new ReactiveReconnectionCallback(sink))));
+                create(sink -> ((Reconnectable) sourceInvokationTarget.get()).reconnect(e,
+                                                                                        new ReactiveReconnectionCallback(sink))));
     }
 
     return empty();
@@ -480,7 +483,7 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
       object = valueResolver.resolve(from(initialiserEvent));
     } catch (MuleException e) {
       throw new MuleRuntimeException(createStaticMessage("Unable to get the " + type.getSimpleName()
-                                                             + " value for Message Source"), e);
+          + " value for Message Source"), e);
     } finally {
       if (initialiserEvent != null) {
         ((BaseEventContext) initialiserEvent.getContext()).success();

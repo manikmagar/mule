@@ -7,18 +7,19 @@
 package org.mule.runtime.module.extension.internal.runtime.source;
 
 import static org.mule.runtime.api.i18n.I18nMessageFactory.createStaticMessage;
+import static org.mule.runtime.extension.api.ExtensionConstants.SCHEDULING_STRATEGY_PARAMETER_NAME;
 import static org.mule.runtime.module.extension.api.util.MuleExtensionUtils.getInitialiserEvent;
 import static org.mule.runtime.module.extension.internal.runtime.resolver.ValueResolvingContext.from;
 import static org.mule.runtime.module.extension.internal.util.IntrospectionUtils.injectComponentLocation;
 import static org.mule.runtime.module.extension.internal.util.IntrospectionUtils.injectDefaultEncoding;
 import static org.mule.runtime.module.extension.internal.util.IntrospectionUtils.injectRefName;
-
 import org.mule.runtime.api.component.location.ComponentLocation;
 import org.mule.runtime.api.exception.MuleException;
 import org.mule.runtime.api.exception.MuleRuntimeException;
 import org.mule.runtime.api.meta.model.source.SourceModel;
 import org.mule.runtime.core.api.MuleContext;
 import org.mule.runtime.core.api.event.CoreEvent;
+import org.mule.runtime.core.api.source.scheduler.Scheduler;
 import org.mule.runtime.core.privileged.event.BaseEventContext;
 import org.mule.runtime.extension.api.annotation.param.Parameter;
 import org.mule.runtime.extension.api.runtime.config.ConfigurationInstance;
@@ -95,8 +96,8 @@ public final class SourceConfigurer {
       Source configuredSource = builder.build(from(initialiserEvent, config));
 
       if (configuredSource instanceof PollingSource) {
-        //TODO: inject scheduler
-        configuredSource = new PollingSourceWrapper((PollingSource) configuredSource, null);
+        Scheduler scheduler = (Scheduler) resolverSet.getResolvers().get(SCHEDULING_STRATEGY_PARAMETER_NAME).resolve(ValueResolvingContext.from(initialiserEvent));
+        configuredSource = new PollingSourceWrapper((PollingSource) configuredSource, scheduler);
       }
 
       return configuredSource;

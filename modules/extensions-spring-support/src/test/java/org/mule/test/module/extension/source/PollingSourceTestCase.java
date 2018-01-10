@@ -25,7 +25,6 @@ import org.mule.test.petstore.extension.PetAdoptionSource;
 import java.util.LinkedList;
 import java.util.List;
 
-import org.junit.Ignore;
 import org.junit.Test;
 
 public class PollingSourceTestCase extends AbstractExtensionFunctionalTestCase {
@@ -59,7 +58,6 @@ public class PollingSourceTestCase extends AbstractExtensionFunctionalTestCase {
   }
 
   @Test
-  @Ignore
   public void idempotentPoll() throws Exception {
     startFlow("idempotent");
     assertAllPetsAdopted();
@@ -93,8 +91,8 @@ public class PollingSourceTestCase extends AbstractExtensionFunctionalTestCase {
       synchronized (ADOPTION_EVENTS) {
         return ADOPTION_EVENTS.size() == ALL_PETS.size() &&
             ALL_PETS.containsAll(ADOPTION_EVENTS.stream()
-                                     .map(e -> e.getMessage().getPayload().getValue().toString())
-                                     .collect(toList()));
+                .map(e -> e.getMessage().getPayload().getValue().toString())
+                .collect(toList()));
       }
     });
   }

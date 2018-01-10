@@ -71,6 +71,7 @@ import org.mule.runtime.module.extension.internal.runtime.connectivity.ReactiveR
 import org.mule.runtime.module.extension.internal.runtime.resolver.ResolverSet;
 import org.mule.runtime.module.extension.internal.runtime.resolver.ResolverSetResult;
 import org.mule.runtime.module.extension.internal.runtime.resolver.ValueResolver;
+import org.mule.runtime.module.extension.internal.runtime.source.poll.PollingSourceWrapper;
 import org.mule.runtime.module.extension.internal.util.FieldSetter;
 
 import java.lang.annotation.Annotation;

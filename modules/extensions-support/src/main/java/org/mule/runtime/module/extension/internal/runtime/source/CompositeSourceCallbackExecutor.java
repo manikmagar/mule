@@ -34,14 +34,14 @@ public class CompositeSourceCallbackExecutor implements SourceCallbackExecutor {
   public Publisher<Void> execute(CoreEvent event, Map<String, Object> parameters, SourceCallbackContext context) {
     Mono<Void> mono;
     if (before != null) {
-      mono = defer(() -> from(before.execute(event, parameters, context)))
-          .flatMap(v -> defer(() -> from(delegate.execute(event, parameters, context))));
+      mono = defer(() -> from(before.execute(event, parameters, context))
+          .transform(v -> defer(() -> from(delegate.execute(event, parameters, context)))));
     } else {
       mono = defer(() -> from(delegate.execute(event, parameters, context)));
     }
 
     if (after != null) {
-      mono = mono.flatMap(v -> defer(() -> from(after.execute(event, parameters, context))));
+      mono = mono.transform(v -> defer(() -> from(after.execute(event, parameters, context))));
     }
 
     return mono;

@@ -1,0 +1,413 @@
+/*
+ * Copyright (c) MuleSoft, Inc.  All rights reserved.  http://www.mulesoft.com
+ * The software in this package is published under the terms of the CPAL v1.0
+ * license, a copy of which has been included with this distribution in the
+ * LICENSE.txt file.
+ */
+package org.mule.runtime.module.extension.internal.runtime.source.poll;
+
+import static java.lang.String.format;
+import static java.util.Optional.ofNullable;
+import static org.mule.runtime.api.i18n.I18nMessageFactory.createStaticMessage;
+import static org.mule.runtime.api.store.ObjectStoreSettings.unmanagedPersistent;
+import static org.mule.runtime.api.util.Preconditions.checkArgument;
+import static org.slf4j.LoggerFactory.getLogger;
+import static reactor.core.publisher.Mono.fromRunnable;
+import org.mule.runtime.api.component.location.ComponentLocation;
+import org.mule.runtime.api.exception.MuleException;
+import org.mule.runtime.api.exception.MuleRuntimeException;
+import org.mule.runtime.api.lock.LockFactory;
+import org.mule.runtime.api.scheduler.SchedulerConfig;
+import org.mule.runtime.api.scheduler.SchedulerService;
+import org.mule.runtime.api.store.ObjectStore;
+import org.mule.runtime.api.store.ObjectStoreException;
+import org.mule.runtime.api.store.ObjectStoreManager;
+import org.mule.runtime.api.store.ObjectStoreSettings;
+import org.mule.runtime.core.api.event.CoreEvent;
+import org.mule.runtime.core.api.source.scheduler.FixedFrequencyScheduler;
+import org.mule.runtime.core.api.source.scheduler.Scheduler;
+import org.mule.runtime.core.api.util.func.CheckedSupplier;
+import org.mule.runtime.extension.api.runtime.operation.Result;
+import org.mule.runtime.extension.api.runtime.source.PollContext;
+import org.mule.runtime.extension.api.runtime.source.PollContext.PollItem;
+import org.mule.runtime.extension.api.runtime.source.PollingSource;
+import org.mule.runtime.extension.api.runtime.source.SourceCallback;
+import org.mule.runtime.extension.api.runtime.source.SourceCallbackContext;
+import org.mule.runtime.module.extension.internal.runtime.source.SourceWrapper;
+
+import java.io.Serializable;
+import java.util.Comparator;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.Lock;
+import java.util.function.Consumer;
+
+import javax.inject.Inject;
+
+import org.reactivestreams.Publisher;
+import org.slf4j.Logger;
+
+public class PollingSourceWrapper<T, A> extends SourceWrapper<T, A> {
+
+  private static final Logger LOGGER = getLogger(PollingSourceWrapper.class);
+  private static final String ITEM_RELEASER_CTX_VAR = "itemReleaser";
+  private static final String WATERMARK_OS_KEY = "watermark";
+
+  private final PollingSource<T, A> delegate;
+  //TODO: To be added via enricher
+  private final Scheduler scheduler;
+
+  @Inject
+  private LockFactory lockFactory;
+
+  @Inject
+  private ObjectStoreManager objectStoreManager;
+
+  @Inject
+  private SchedulerService schedulerService;
+
+  private ObjectStore<Serializable> watermarkObjectStore;
+  private ObjectStore<Serializable> inflightIdsObjectStore;
+
+  private ComponentLocation componentLocation;
+  private String location;
+  private final AtomicBoolean stopRequested = new AtomicBoolean(false);
+  private org.mule.runtime.api.scheduler.Scheduler executor;
+
+  public PollingSourceWrapper(PollingSource<T, A> delegate, Scheduler scheduler) {
+    super(delegate);
+    this.delegate = delegate;
+    //this.scheduler = scheduler;
+    this.scheduler = new FixedFrequencyScheduler();
+  }
+
+  @Override
+  public void onStart(SourceCallback<T, A> sourceCallback) throws MuleException {
+    delegate.onStart(sourceCallback);
+    location = componentLocation.getLocation();
+    inflightIdsObjectStore = objectStoreManager.getOrCreateObjectStore(location + "/inflight-ids",
+                                                                       ObjectStoreSettings.builder()
+                                                                           .persistent(false)
+                                                                           .maxEntries(1000)
+                                                                           .entryTtl(60000L)
+                                                                           .expirationInterval(20000L)
+                                                                           .build());
+
+
+    watermarkObjectStore = objectStoreManager.getOrCreateObjectStore(location + "/watermark", unmanagedPersistent());
+    executor = schedulerService.customScheduler(SchedulerConfig.config()
+                                                    .withMaxConcurrentTasks(1)
+                                                    .withName(location + ":executor"));
+
+    stopRequested.set(false);
+    scheduler.schedule(executor, () -> poll(sourceCallback));
+  }
+
+  @Override
+  public void onStop() {
+    stopRequested.set(true);
+    shutdownScheduler();
+    try {
+      delegate.onStop();
+    } catch (Throwable t) {
+
+    }
+  }
+
+  @Override
+  public Publisher<Void> onTerminate(CoreEvent event, Map<String, Object> parameters, SourceCallbackContext context) {
+    return releaseOnCallback(context);
+  }
+
+  @Override
+  public Publisher<Void> onBackPressure(CoreEvent event, Map<String, Object> parameters, SourceCallbackContext context) {
+    return releaseOnCallback(context);
+  }
+
+  private Publisher<Void> releaseOnCallback(SourceCallbackContext context) {
+    return fromRunnable(() -> release(context));
+  }
+
+  private void poll(SourceCallback<T, A> sourceCallback) {
+    if (isRequestedToStop()) {
+      return;
+    }
+
+    DefaultPollContext pollContext = new DefaultPollContext(sourceCallback, getCurrentWatermark());
+    delegate.poll(pollContext);
+
+    pollContext.getUpdatedWatermark().ifPresent(w -> updateWatermark(w, pollContext.getWatermarkComparator()));
+  }
+
+  private class DefaultPollContext implements PollContext<T, A> {
+
+    private final SourceCallback<T, A> sourceCallback;
+    private Serializable watermark;
+    private Comparator<Serializable> watermarkComparator = null;
+
+    private DefaultPollContext(SourceCallback<T, A> sourceCallback, Serializable watermark) {
+      this.sourceCallback = sourceCallback;
+      this.watermark = watermark;
+    }
+
+    @Override
+    public void accept(Consumer<PollItem<T, A>> consumer) {
+      final SourceCallbackContext callbackContext = sourceCallback.createContext();
+      DefaultPollItem pollItem = new DefaultPollItem(callbackContext);
+
+      consumer.accept(pollItem);
+
+      pollItem.validate();
+
+      if (passesWatermark(pollItem) && acquireItem(pollItem, callbackContext)) {
+        sourceCallback.handle(pollItem.getResult(), callbackContext);
+      }
+
+      release(pollItem.getResult(), callbackContext);
+    }
+
+    @Override
+    public Optional<Serializable> getWatermark() {
+      return ofNullable(watermark);
+    }
+
+    @Override
+    public void setWatermarkComparator(Comparator<? extends Serializable> comparator) {
+      checkArgument(comparator != null, "Cannot set a null watermark comparator");
+      this.watermarkComparator = (Comparator<Serializable>) comparator;
+    }
+
+    private Optional<Serializable> getUpdatedWatermark() {
+      return ofNullable(watermark);
+    }
+
+    private Comparator<Serializable> getWatermarkComparator() {
+      return watermarkComparator;
+    }
+
+    private boolean passesWatermark(DefaultPollItem pollItem) {
+      Serializable itemWatermark = pollItem.getWatermark().orElse(null);
+      if (itemWatermark == null) {
+        return true;
+      }
+
+      if (watermarkComparator == null) {
+        throw new IllegalStateException(format(
+            "Source at location '%s' pushed a watermarked item but no watermark comparator was provided", location));
+      }
+
+      if (watermark == null) {
+        watermark = itemWatermark;
+        return true;
+      } else if (watermarkComparator.compare(watermark, itemWatermark) >= 0) {
+        if (LOGGER.isDebugEnabled()) {
+          String itemId =
+              pollItem.getItemId().orElseGet(() -> pollItem.getResult().getAttributes().map(Object::toString).orElse(""));
+          LOGGER.debug("Skipping item '{}' because it was rejected by the watermark", itemId);
+        }
+        return false;
+      } else {
+        watermark = itemWatermark;
+        return true;
+      }
+    }
+  }
+
+
+  private class DefaultPollItem implements PollItem<T, A> {
+
+    private final SourceCallbackContext sourceCallbackContext;
+    private Result<T, A> result;
+    private Serializable watermark;
+    private String itemId;
+
+    private DefaultPollItem(SourceCallbackContext sourceCallbackContext) {
+      this.sourceCallbackContext = sourceCallbackContext;
+    }
+
+    @Override
+    public SourceCallbackContext getSourceCallbackContext() {
+      return sourceCallbackContext;
+    }
+
+    @Override
+    public PollItem<T, A> setResult(Result<T, A> result) {
+      checkArgument(result != null, "Cannot set a null Result");
+      this.result = result;
+
+      return this;
+    }
+
+    @Override
+    public PollItem<T, A> setWatermark(Serializable watermark) {
+      checkArgument(watermark != null, "Cannot set a null watermark");
+      this.watermark = watermark;
+
+      return this;
+    }
+
+    @Override
+    public PollItem<T, A> setId(String id) {
+      checkArgument(id != null, "Cannot set a null id");
+      itemId = id;
+
+      return this;
+    }
+
+    private Optional<Serializable> getWatermark() {
+      return ofNullable(watermark);
+    }
+
+    private Optional<String> getItemId() {
+      return ofNullable(itemId);
+    }
+
+    private Result<T, A> getResult() {
+      return result;
+    }
+
+    private void validate() {
+      if (result == null) {
+        throw new IllegalStateException(format(
+            "Source at location '%s' pushed an item with a null Result", location));
+      }
+    }
+  }
+
+  private void release(Result<T, A> result, SourceCallbackContext context) {
+    try {
+      delegate.releaseRejectedResource(result);
+    } finally {
+      release(context);
+    }
+  }
+
+  private void release(SourceCallbackContext context) {
+    context.<ItemReleaser>getVariable(ITEM_RELEASER_CTX_VAR).ifPresent(ItemReleaser::release);
+  }
+
+  private <T> T withWatermarkLock(CheckedSupplier<T> supplier) {
+    Lock lock = lockFactory.createLock(location + "/watermark");
+    lock.lock();
+    try {
+      return supplier.get();
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  private void updateWatermark(Serializable value, Comparator<Serializable> comparator) {
+    if (value == null) {
+      return;
+    }
+
+    withWatermarkLock(() -> {
+      try {
+        if (watermarkObjectStore.contains(WATERMARK_OS_KEY)) {
+          Serializable currentValue = watermarkObjectStore.retrieve(WATERMARK_OS_KEY);
+          if (comparator.compare(currentValue, value) >= 0) {
+            return null;
+          }
+          watermarkObjectStore.remove(WATERMARK_OS_KEY);
+        }
+
+        watermarkObjectStore.store(WATERMARK_OS_KEY, value);
+      } catch (ObjectStoreException e) {
+        throw new MuleRuntimeException(
+            createStaticMessage(format("Failed to update watermark value for message source at location '%s'. %s",
+                                       location, e.getMessage())), e);
+      }
+
+      return null;
+    });
+  }
+
+  private Serializable getCurrentWatermark() {
+    return withWatermarkLock(() -> {
+      try {
+        if (watermarkObjectStore.contains(WATERMARK_OS_KEY)) {
+          return watermarkObjectStore.retrieve(WATERMARK_OS_KEY);
+        } else {
+          return null;
+        }
+      } catch (ObjectStoreException e) {
+        throw new MuleRuntimeException(
+            createStaticMessage(format("Failed to fetch watermark for Message source at location '%s'. %s",
+                                       location, e.getMessage())), e);
+      }
+    });
+  }
+
+  private boolean acquireItem(DefaultPollItem pollItem, SourceCallbackContext callbackContext) {
+    if (!pollItem.getItemId().isPresent()) {
+      return true;
+    }
+
+    String id = pollItem.getItemId().get();
+    Lock lock = lockFactory.createLock(location + "/" + id);
+    if (!lock.tryLock()) {
+      if (LOGGER.isDebugEnabled()) {
+        LOGGER.debug("Skipping processing of item '{}' because another thread or node already has a mule lock on it", id);
+      }
+      return false;
+    }
+
+    try {
+      if (inflightIdsObjectStore.contains(id)) {
+        if (LOGGER.isDebugEnabled()) {
+          LOGGER.debug("Polled item '{}', but skipping it since it is already being processed in another thread or node", id);
+        }
+        lock.unlock();
+        return false;
+      } else {
+        try {
+          inflightIdsObjectStore.store(id, id);
+          callbackContext.addVariable(ITEM_RELEASER_CTX_VAR, new ItemReleaser(id, lock));
+          return true;
+        } catch (ObjectStoreException e) {
+          lock.unlock();
+          LOGGER.error(format("Could not track item '%s' as being processed. %s", id, e.getMessage()), e);
+          return false;
+        }
+      }
+    } catch (Exception e) {
+      lock.unlock();
+      // handle;
+      return false;
+    }
+  }
+
+  private boolean isRequestedToStop() {
+    return stopRequested.get() || Thread.currentThread().isInterrupted();
+  }
+
+  private void shutdownScheduler() {
+    if (executor != null) {
+      executor.stop();
+    }
+  }
+
+  private class ItemReleaser {
+
+    private final String id;
+    private final Lock lock;
+
+    private ItemReleaser(String id, Lock lock) {
+      this.id = id;
+      this.lock = lock;
+    }
+
+    private void release() {
+      try {
+        if (inflightIdsObjectStore.contains(id)) {
+          inflightIdsObjectStore.remove(id);
+        }
+      } catch (ObjectStoreException e) {
+        // handle
+      } finally {
+        lock.unlock();
+      }
+    }
+  }
+}

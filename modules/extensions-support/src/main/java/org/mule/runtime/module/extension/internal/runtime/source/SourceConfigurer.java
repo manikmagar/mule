@@ -28,6 +28,7 @@ import org.mule.runtime.module.extension.internal.loader.ParameterGroupDescripto
 import org.mule.runtime.module.extension.internal.runtime.objectbuilder.ResolverSetBasedObjectBuilder;
 import org.mule.runtime.module.extension.internal.runtime.resolver.ResolverSet;
 import org.mule.runtime.module.extension.internal.runtime.resolver.ValueResolvingContext;
+import org.mule.runtime.module.extension.internal.runtime.source.poll.PollingSourceWrapper;
 
 import java.util.Optional;
 

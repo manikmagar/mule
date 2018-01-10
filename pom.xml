@@ -252,7 +252,7 @@
         <muleVeganExtensionTestVersion>4.1.0-DRY-RUN</muleVeganExtensionTestVersion>
         <muleHeisenbergExtensionTestVersion>4.1.0-DRY-RUN</muleHeisenbergExtensionTestVersion>
         <muleMarvelExtensionTestVersion>4.1.0-DRY-RUN</muleMarvelExtensionTestVersion>
-        <mulePetstoreExtensionTestVersion>4.1.0-SNAPSHOT</mulePetstoreExtensionTestVersion>
+        <mulePetstoreExtensionTestVersion>4.1.0-DRY-RUN</mulePetstoreExtensionTestVersion>
         <muleSubtypesExtensionTestVersion>4.1.0-SNAPSHOT</muleSubtypesExtensionTestVersion>
 
         <!--Maven plugins versions-->

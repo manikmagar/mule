@@ -182,10 +182,10 @@ public class PollingSourceWrapper<T, A> extends SourceWrapper<T, A> {
       pollItem.validate();
 
       PollItemStatus status;
-      if (!passesWatermark(pollItem)) {
-        status = FILTERED_BY_WATERMARK;
-      } else if (!acquireItem(pollItem, callbackContext)) {
+      if (!acquireItem(pollItem, callbackContext)) {
         status = ALREADY_IN_PROCESS;
+      } else if (!passesWatermark(pollItem)) {
+        status = FILTERED_BY_WATERMARK;
       } else if (isRequestedToStop()) {
         status = SOURCE_STOPPING;
       } else {
@@ -238,7 +238,7 @@ public class PollingSourceWrapper<T, A> extends SourceWrapper<T, A> {
       if (watermark == null) {
         watermark = itemWatermark;
         return true;
-      } else if (compareWatermarks(watermark, itemWatermark, watermarkComparator) >= 0) {
+      } else if (compareWatermarks(watermark, itemWatermark, watermarkComparator) > 0) {
         if (LOGGER.isDebugEnabled()) {
           String itemId =
               pollItem.getItemId().orElseGet(() -> pollItem.getResult().getAttributes().map(Object::toString).orElse(""));

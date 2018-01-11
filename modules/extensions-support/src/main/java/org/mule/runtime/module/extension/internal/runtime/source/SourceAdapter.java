@@ -199,7 +199,7 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
 
   private SourceCallbackExecutor getMethodExecutor(Optional<Method> method,
                                                    SourceCallbackModelProperty sourceCallbackModel,
-                                                   SourceCallbackExecutor before) {
+                                                   SourceCallbackExecutor then) {
     SourceCallbackExecutor executor = method
         .map(m -> (SourceCallbackExecutor) new ReflectiveSourceCallbackExecutor(extensionModel, configurationInstance,
                                                                                 sourceModel,
@@ -211,8 +211,8 @@ public class SourceAdapter implements Startable, Stoppable, Initialisable {
                                                                                 sourceCallbackModel))
         .orElse(NullSourceCallbackExecutor.INSTANCE);
 
-    if (before != null) {
-      executor = new CompositeSourceCallbackExecutor(before, executor, null);
+    if (then != null) {
+      executor = new ComposedSourceCallbackExecutor(executor, then);
     }
 
     return executor;

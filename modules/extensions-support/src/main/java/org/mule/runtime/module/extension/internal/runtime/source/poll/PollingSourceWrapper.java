@@ -7,13 +7,19 @@
 package org.mule.runtime.module.extension.internal.runtime.source.poll;
 
 import static java.lang.String.format;
+import static java.util.Comparator.naturalOrder;
 import static java.util.Optional.ofNullable;
 import static org.mule.runtime.api.i18n.I18nMessageFactory.createStaticMessage;
 import static org.mule.runtime.api.store.ObjectStoreSettings.unmanagedPersistent;
 import static org.mule.runtime.api.util.Preconditions.checkArgument;
+import static org.mule.runtime.extension.api.runtime.source.PollContext.PollItemStatus.ACCEPTED;
+import static org.mule.runtime.extension.api.runtime.source.PollContext.PollItemStatus.ALREADY_IN_PROCESS;
+import static org.mule.runtime.extension.api.runtime.source.PollContext.PollItemStatus.FILTERED_BY_WATERMARK;
+import static org.mule.runtime.extension.api.runtime.source.PollContext.PollItemStatus.SOURCE_STOPPING;
 import static org.slf4j.LoggerFactory.getLogger;
 import static reactor.core.publisher.Mono.fromRunnable;
 import org.mule.runtime.api.component.location.ComponentLocation;
+import org.mule.runtime.api.connection.ConnectionException;
 import org.mule.runtime.api.exception.MuleException;
 import org.mule.runtime.api.exception.MuleRuntimeException;
 import org.mule.runtime.api.lock.LockFactory;
@@ -24,9 +30,8 @@ import org.mule.runtime.api.store.ObjectStoreException;
 import org.mule.runtime.api.store.ObjectStoreManager;
 import org.mule.runtime.api.store.ObjectStoreSettings;
 import org.mule.runtime.core.api.event.CoreEvent;
-import org.mule.runtime.core.api.source.scheduler.FixedFrequencyScheduler;
 import org.mule.runtime.core.api.source.scheduler.Scheduler;
-import org.mule.runtime.core.api.util.func.CheckedSupplier;
+import org.mule.runtime.core.api.util.func.CheckedRunnable;
 import org.mule.runtime.extension.api.runtime.operation.Result;
 import org.mule.runtime.extension.api.runtime.source.PollContext;
 import org.mule.runtime.extension.api.runtime.source.PollContext.PollItem;
@@ -78,8 +83,7 @@ public class PollingSourceWrapper<T, A> extends SourceWrapper<T, A> {
   public PollingSourceWrapper(PollingSource<T, A> delegate, Scheduler scheduler) {
     super(delegate);
     this.delegate = delegate;
-    //this.scheduler = scheduler;
-    this.scheduler = new FixedFrequencyScheduler();
+    this.scheduler = scheduler;
   }
 
   @Override
@@ -97,8 +101,8 @@ public class PollingSourceWrapper<T, A> extends SourceWrapper<T, A> {
 
     watermarkObjectStore = objectStoreManager.getOrCreateObjectStore(location + "/watermark", unmanagedPersistent());
     executor = schedulerService.customScheduler(SchedulerConfig.config()
-        .withMaxConcurrentTasks(1)
-        .withName(location + ":executor"));
+                                                    .withMaxConcurrentTasks(1)
+                                                    .withName(location + ":executor"));
 
     stopRequested.set(false);
     scheduler.schedule(executor, () -> poll(sourceCallback));
@@ -111,7 +115,7 @@ public class PollingSourceWrapper<T, A> extends SourceWrapper<T, A> {
     try {
       delegate.onStop();
     } catch (Throwable t) {
-
+      LOGGER.error(format("Found error while stopping source at location '%s'. %s", location, t.getMessage()), t);
     }
   }
 
@@ -134,10 +138,27 @@ public class PollingSourceWrapper<T, A> extends SourceWrapper<T, A> {
       return;
     }
 
-    DefaultPollContext pollContext = new DefaultPollContext(sourceCallback, getCurrentWatermark());
-    delegate.poll(pollContext);
+    withWatermarkLock(() -> {
+      DefaultPollContext pollContext = new DefaultPollContext(sourceCallback, getCurrentWatermark());
+      try {
+        delegate.poll(pollContext);
+        pollContext.getUpdatedWatermark().ifPresent(w -> updateWatermark(w, pollContext.getWatermarkComparator()));
+      } catch (Throwable t) {
+        LOGGER.error(format("Found exception trying to process item on source at location '%s'. %s",
+                            location, t.getMessage()), t);
+      }
+    });
+  }
 
-    pollContext.getUpdatedWatermark().ifPresent(w -> updateWatermark(w, pollContext.getWatermarkComparator()));
+  private int compareWatermarks(Serializable w1, Serializable w2, Comparator comparator) throws IllegalArgumentException {
+    if (comparator == null && w1 instanceof Serializable && w2 instanceof Serializable) {
+      comparator = naturalOrder();
+    } else {
+      LOGGER.error("Non comparable watermark values [{}, {}] were provided on source at location '{}'. Use comparable values or "
+                       + "set a custom comparator. Watermark not updated.", w1, w2, location);
+    }
+
+    return comparator.compare(w1, w2);
   }
 
   private class DefaultPollContext implements PollContext<T, A> {
@@ -152,7 +173,7 @@ public class PollingSourceWrapper<T, A> extends SourceWrapper<T, A> {
     }
 
     @Override
-    public void accept(Consumer<PollItem<T, A>> consumer) {
+    public PollItemStatus accept(Consumer<PollItem<T, A>> consumer) {
       final SourceCallbackContext callbackContext = sourceCallback.createContext();
       DefaultPollItem pollItem = new DefaultPollItem(callbackContext);
 
@@ -160,11 +181,28 @@ public class PollingSourceWrapper<T, A> extends SourceWrapper<T, A> {
 
       pollItem.validate();
 
-      if (passesWatermark(pollItem) && acquireItem(pollItem, callbackContext)) {
-        sourceCallback.handle(pollItem.getResult(), callbackContext);
+      PollItemStatus status;
+      if (!passesWatermark(pollItem)) {
+        status = FILTERED_BY_WATERMARK;
+      } else if (!acquireItem(pollItem, callbackContext)) {
+        status = ALREADY_IN_PROCESS;
+      } else if (isRequestedToStop()) {
+        status = SOURCE_STOPPING;
       } else {
+        sourceCallback.handle(pollItem.getResult(), callbackContext);
+        status = ACCEPTED;
+      }
+
+      if (status != ACCEPTED) {
         release(pollItem.getResult(), callbackContext);
       }
+
+      return status;
+    }
+
+    @Override
+    public boolean isSourceStopping() {
+      return isRequestedToStop();
     }
 
     @Override
@@ -176,6 +214,11 @@ public class PollingSourceWrapper<T, A> extends SourceWrapper<T, A> {
     public void setWatermarkComparator(Comparator<? extends Serializable> comparator) {
       checkArgument(comparator != null, "Cannot set a null watermark comparator");
       this.watermarkComparator = (Comparator<Serializable>) comparator;
+    }
+
+    @Override
+    public void onConnectionException(ConnectionException e) {
+      sourceCallback.onConnectionException(e);
     }
 
     private Optional<Serializable> getUpdatedWatermark() {
@@ -192,16 +235,10 @@ public class PollingSourceWrapper<T, A> extends SourceWrapper<T, A> {
         return true;
       }
 
-      if (watermarkComparator == null) {
-        throw new IllegalStateException(format(
-                                               "Source at location '%s' pushed a watermarked item but no watermark comparator was provided",
-                                               location));
-      }
-
       if (watermark == null) {
         watermark = itemWatermark;
         return true;
-      } else if (watermarkComparator.compare(watermark, itemWatermark) >= 0) {
+      } else if (compareWatermarks(watermark, itemWatermark, watermarkComparator) >= 0) {
         if (LOGGER.isDebugEnabled()) {
           String itemId =
               pollItem.getItemId().orElseGet(() -> pollItem.getResult().getAttributes().map(Object::toString).orElse(""));
@@ -214,7 +251,6 @@ public class PollingSourceWrapper<T, A> extends SourceWrapper<T, A> {
       }
     }
   }
-
 
   private class DefaultPollItem implements PollItem<T, A> {
 
@@ -271,14 +307,14 @@ public class PollingSourceWrapper<T, A> extends SourceWrapper<T, A> {
     private void validate() {
       if (result == null) {
         throw new IllegalStateException(format(
-                                               "Source at location '%s' pushed an item with a null Result", location));
+            "Source at location '%s' pushed an item with a null Result", location));
       }
     }
   }
 
   private void release(Result<T, A> result, SourceCallbackContext context) {
     try {
-      delegate.releaseRejectedResource(result);
+      delegate.releaseRejectedResource(result, context);
     } finally {
       release(context);
     }
@@ -288,58 +324,52 @@ public class PollingSourceWrapper<T, A> extends SourceWrapper<T, A> {
     context.<ItemReleaser>getVariable(ITEM_RELEASER_CTX_VAR).ifPresent(ItemReleaser::release);
   }
 
-  private <T> T withWatermarkLock(CheckedSupplier<T> supplier) {
-    Lock lock = lockFactory.createLock(location + "/watermark");
+  private void withWatermarkLock(CheckedRunnable runnable) {
+    Lock lock = getWatermarkLock();
     lock.lock();
     try {
-      return supplier.get();
+      runnable.run();
     } finally {
       lock.unlock();
     }
   }
 
-  private void updateWatermark(Serializable value, Comparator<Serializable> comparator) {
-    if (value == null) {
-      return;
-    }
+  private Lock getWatermarkLock() {
+    return lockFactory.createLock(location + "/watermark");
+  }
 
-    withWatermarkLock(() -> {
-      try {
-        if (watermarkObjectStore.contains(WATERMARK_OS_KEY)) {
-          Serializable currentValue = watermarkObjectStore.retrieve(WATERMARK_OS_KEY);
-          if (comparator.compare(currentValue, value) >= 0) {
-            return null;
-          }
-          watermarkObjectStore.remove(WATERMARK_OS_KEY);
+  private void updateWatermark(Serializable value, Comparator comparator) {
+    try {
+      if (watermarkObjectStore.contains(WATERMARK_OS_KEY)) {
+        Serializable currentValue = watermarkObjectStore.retrieve(WATERMARK_OS_KEY);
+        if (compareWatermarks(currentValue, value, comparator) >= 0) {
+          return;
         }
-
-        watermarkObjectStore.store(WATERMARK_OS_KEY, value);
-      } catch (ObjectStoreException e) {
-        throw new MuleRuntimeException(
-                                       createStaticMessage(format("Failed to update watermark value for message source at location '%s'. %s",
-                                                                  location, e.getMessage())),
-                                       e);
+        watermarkObjectStore.remove(WATERMARK_OS_KEY);
       }
 
-      return null;
-    });
+      watermarkObjectStore.store(WATERMARK_OS_KEY, value);
+    } catch (ObjectStoreException e) {
+      throw new MuleRuntimeException(
+          createStaticMessage(format("Failed to update watermark value for message source at location '%s'. %s",
+                                     location, e.getMessage())),
+          e);
+    }
   }
 
   private Serializable getCurrentWatermark() {
-    return withWatermarkLock(() -> {
-      try {
-        if (watermarkObjectStore.contains(WATERMARK_OS_KEY)) {
-          return watermarkObjectStore.retrieve(WATERMARK_OS_KEY);
-        } else {
-          return null;
-        }
-      } catch (ObjectStoreException e) {
-        throw new MuleRuntimeException(
-                                       createStaticMessage(format("Failed to fetch watermark for Message source at location '%s'. %s",
-                                                                  location, e.getMessage())),
-                                       e);
+    try {
+      if (watermarkObjectStore.contains(WATERMARK_OS_KEY)) {
+        return watermarkObjectStore.retrieve(WATERMARK_OS_KEY);
+      } else {
+        return null;
       }
-    });
+    } catch (ObjectStoreException e) {
+      throw new MuleRuntimeException(
+          createStaticMessage(format("Failed to fetch watermark for Message source at location '%s'. %s",
+                                     location, e.getMessage())),
+          e);
+    }
   }
 
   private boolean acquireItem(DefaultPollItem pollItem, SourceCallbackContext callbackContext) {
@@ -376,7 +406,8 @@ public class PollingSourceWrapper<T, A> extends SourceWrapper<T, A> {
       }
     } catch (Exception e) {
       lock.unlock();
-      // handle;
+      LOGGER.error(format(
+          "Could not guarantee idempotency for item '%s' for source at location '%s'. '%s", id, location, e.getMessage()), e);
       return false;
     }
   }
@@ -407,7 +438,7 @@ public class PollingSourceWrapper<T, A> extends SourceWrapper<T, A> {
           inflightIdsObjectStore.remove(id);
         }
       } catch (ObjectStoreException e) {
-        // handle
+        LOGGER.error(format("Could not untrack item '%s' in source at location '%s'. %s", id, location, e.getMessage()), e);
       } finally {
         lock.unlock();
       }

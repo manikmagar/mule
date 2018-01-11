@@ -44,6 +44,11 @@ public class PollingSourceTestCase extends AbstractExtensionFunctionalTestCase {
   }
 
   @Override
+  protected void doTearDown() throws Exception {
+    ADOPTION_EVENTS.clear();
+  }
+
+  @Override
   protected String getConfigFile() {
     return "polling-source-config.xml";
   }
@@ -62,6 +67,14 @@ public class PollingSourceTestCase extends AbstractExtensionFunctionalTestCase {
     startFlow("idempotent");
     assertAllPetsAdopted();
     assertIdempotentAdoptions();
+  }
+
+  @Test
+  public void idempotentLocksAreReleased() throws Exception {
+    startFlow("idempotentLocksAreReleased");
+    assertAllPetsAdopted();
+    doTearDown();
+    assertAllPetsAdopted();
   }
 
   @Test
@@ -89,7 +102,7 @@ public class PollingSourceTestCase extends AbstractExtensionFunctionalTestCase {
   private void assertAllPetsAdopted() {
     check(5000, 100, () -> {
       synchronized (ADOPTION_EVENTS) {
-        return ADOPTION_EVENTS.size() == ALL_PETS.size() &&
+        return ADOPTION_EVENTS.size() >= ALL_PETS.size() &&
             ALL_PETS.containsAll(ADOPTION_EVENTS.stream()
                 .map(e -> e.getMessage().getPayload().getValue().toString())
                 .collect(toList()));

@@ -18,6 +18,7 @@ import org.mule.runtime.extension.api.annotation.param.Parameter;
 import org.mule.runtime.extension.api.runtime.operation.Result;
 import org.mule.runtime.extension.api.runtime.source.PollContext;
 import org.mule.runtime.extension.api.runtime.source.PollingSource;
+import org.mule.runtime.extension.api.runtime.source.SourceCallbackContext;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -87,7 +88,7 @@ public class PetAdoptionSource extends PollingSource<String, Void> {
   }
 
   @Override
-  public void releaseRejectedResource(Result<String, Void> result) {
+  public void releaseRejectedResource(Result<String, Void> result, SourceCallbackContext context) {
     REJECTED_ADOPTIONS++;
   }
 

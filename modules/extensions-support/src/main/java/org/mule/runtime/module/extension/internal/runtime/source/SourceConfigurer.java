@@ -96,7 +96,8 @@ public final class SourceConfigurer {
       Source configuredSource = builder.build(from(initialiserEvent, config));
 
       if (configuredSource instanceof PollingSource) {
-        Scheduler scheduler = (Scheduler) resolverSet.getResolvers().get(SCHEDULING_STRATEGY_PARAMETER_NAME).resolve(ValueResolvingContext.from(initialiserEvent));
+        Scheduler scheduler = (Scheduler) resolverSet.getResolvers().get(SCHEDULING_STRATEGY_PARAMETER_NAME)
+            .resolve(ValueResolvingContext.from(initialiserEvent));
         configuredSource = new PollingSourceWrapper((PollingSource) configuredSource, scheduler);
       }
 
